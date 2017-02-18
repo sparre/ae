@@ -1,4 +1,5 @@
 with Ada.Directories;
+with Ada.Strings.Unbounded;
 with Ada.Text_IO;
 
 with Shell;
@@ -7,31 +8,44 @@ with Analytical_Engine.Environment;
 
 package body Analytical_Engine.Schematic_Handler is
 
+   use Types;
+   use all type YAML.Node_Kind;
+
    function "+" (Item : in String) return Ada.Strings.Unbounded.Unbounded_String
      renames Ada.Strings.Unbounded.To_Unbounded_String;
 
-   function "+" (Item : in Ada.Strings.Unbounded.Unbounded_String) return String
-     renames Ada.Strings.Unbounded.To_String;
-
    function "&" (Left  : in String;
-                 Right : in Ada.Strings.Unbounded.Unbounded_String) return String;
+                 Right : in Unbounded_UTF8_String) return String;
+
+   function Value (Source  : in YAML.Node_Ref;
+                   Name    : in YAML.UTF8_String;
+                   Default : in YAML.UTF8_String) return YAML.UTF8_String
+     with Pre => Source.Kind = Mapping_Node;
 
    procedure Run_With_Prefixed_Output
-     (Prefix            : in     String;
-      Program           : in     String;
+     (Prefix            : in     UTF8_String;
+      Program           : in     UTF8_String;
       Arguments         : in     Shell.String_Array := Shell.Nil_Strings;
       Working_Directory : in     String := ".");
 
+   procedure Run_With_Prefixed_Output
+     (Prefix            : in     UTF8_String;
+      Command           : in     UTF8_String;
+      Working_Directory : in     String := ".");
+
+   procedure Run_Steps (Item  : in     Class;
+                        Steps : in     UTF8_Strings.Vector);
+
    task type Log_From_Pipe is
-      entry Configure (Name : in String;
+      entry Configure (Name : in UTF8_String;
                        Pipe : in Shell.Pipe);
    end Log_From_Pipe;
 
    task body Log_From_Pipe is
-      Step   : Ada.Strings.Unbounded.Unbounded_String;
+      Step   : Types.Unbounded_UTF8_String;
       Source : Shell.Pipe;
    begin
-      accept Configure (Name : in String;
+      accept Configure (Name : in UTF8_String;
                         Pipe : in Shell.Pipe) do
          Step   := +Name;
          Source := Pipe;
@@ -47,9 +61,9 @@ package body Analytical_Engine.Schematic_Handler is
    end Log_From_Pipe;
 
    function "&" (Left  : in String;
-                 Right : in Ada.Strings.Unbounded.Unbounded_String) return String is
+                 Right : in Unbounded_UTF8_String) return String is
    begin
-      return Left & Ada.Strings.Unbounded.To_String (Right);
+      return Left & To_String (Right);
    end "&";
 
    procedure Bootstrap (Item : in out Instance) is
@@ -68,65 +82,76 @@ package body Analytical_Engine.Schematic_Handler is
    end Build;
 
    procedure Checkout (Item : in out Instance) is
+      use Ada.Directories;
    begin
       Ada.Text_IO.Put_Line (">> checkout");
 
-      declare
-         use Ada.Directories;
+      if not Exists (Environment.Repos_Directory) then
+         Create_Directory (Environment.Repos_Directory);
+      end if;
 
-         URL             : constant String := Item.Schematic.Get ("source").Get ("url");
-         Branch          : constant String := Item.Schematic.Get ("source").Get ("ref", Default => "master");
-         Repos_Directory : constant String := Compose (Environment.Cache_Directory,
-                                                       "repos");
-      begin
-         Item.Checkout_Directory := +Compose (Repos_Directory, Item.Name);
-
-         if not Exists (Repos_Directory) then
-            Create_Directory (Repos_Directory);
-         end if;
-
-         if Exists (+Item.Checkout_Directory) then
-            Run_With_Prefixed_Output
-              (Prefix            => Item.Name,
-               Program           => "git",
-               Arguments         => (1 => +"fetch"),
-               Working_Directory => +Item.Checkout_Directory);
-         else
-            Run_With_Prefixed_Output
-              (Prefix            => Item.Name,
-               Program           => "git",
-               Arguments         => (+"clone",
-                                     +"--depth",
-                                     +"1",
-                                     +URL,
-                                     Item.Checkout_Directory));
-         end if;
-
+      if Exists (String (Item.Checkout_Directory)) then
          Run_With_Prefixed_Output
-           (Prefix            => Item.Name,
+           (Prefix            => +Item.Name,
             Program           => "git",
-            Arguments         => (+"checkout",
-                                  +("origin/" & Branch)),
-            Working_Directory => +Item.Checkout_Directory);
-      end;
+            Arguments         => (1 => +"fetch"),
+            Working_Directory => String (Item.Checkout_Directory));
+      else
+         Run_With_Prefixed_Output
+           (Prefix            => +Item.Name,
+            Program           => "git",
+            Arguments         => (+"clone",
+                                  +"--depth",
+                                  +"1",
+                                  +String (+Item.Source_URL),
+                                  +String (Item.Checkout_Directory)));
+      end if;
+
+      Run_With_Prefixed_Output
+        (Prefix            => +Item.Name,
+         Program           => "git",
+         Arguments         => (+"checkout",
+                               +("origin/" & Item.Source_Branch)),
+         Working_Directory => String (Item.Checkout_Directory));
    end Checkout;
 
-   function Create (Schematic : in YAML.Object.Instance)
-                   return Class is
+   function Checkout_Directory (Item : in Instance)
+                               return Types.UTF8_String is
+      use Ada.Directories;
    begin
-      return Instance'(Schematic          => Schematic,
-                       Checkout_Directory => <>);
+      return
+        UTF8_String (Compose (Containing_Directory => Environment.Repos_Directory,
+                              Name                 => String (+Item.Name)));
+   end Checkout_Directory;
+
+   function Create (Schematic : in YAML.Document_Type)
+                   return Class
+   is
+      Root            : constant YAML.Node_Ref := Schematic.Root_Node;
+      Source          : constant YAML.Node_Ref := Root.Item ("source");
+      Source_URL      : constant YAML.UTF8_String := Source.Item ("url").Value;
+      Source_Branch   : constant YAML.UTF8_String := Value (Source, "ref", "master");
+      --  Repos_Directory : constant String := Compose (Environment.Cache_Directory,
+      --                                                   "repos");
+   begin
+      return Instance'(Name            => +Root.Item ("name").Value,
+                       Source_URL      => +Source_URL,
+                       Source_Branch   => +Source_Branch,
+                       Source_Versions => +Source.Item ("versions").Value,
+                       Prepare_Steps   => +Source.Item ("prepare"),
+                       Build_Steps     => +Source.Item ("build"),
+                       Install_Steps   => +Source.Item ("install"));
    end Create;
 
    procedure Install (Item : in out Instance) is
-      pragma Unreferenced (Item);
    begin
       Ada.Text_IO.Put_Line (">> install");
+      Item.Run_Steps (Steps => Item.Install_Steps);
    end Install;
 
-   function Name (Item : in Class) return String is
+   function Name (Item : in Class) return Types.UTF8_String is
    begin
-      return Item.Schematic.Get ("name");
+      return +Item.Name;
    end Name;
 
    procedure Prepare (Item : in out Instance) is
@@ -135,9 +160,20 @@ package body Analytical_Engine.Schematic_Handler is
       Ada.Text_IO.Put_Line (">> prepare");
    end Prepare;
 
+   procedure Run_Steps (Item  : in     Class;
+                        Steps : in     UTF8_Strings.Vector) is
+   begin
+      for Command of Steps loop
+         Run_With_Prefixed_Output
+           (Prefix            => +Item.Name,
+            Command           => Command,
+            Working_Directory => String (Item.Checkout_Directory));
+      end loop;
+   end Run_Steps;
+
    procedure Run_With_Prefixed_Output
-     (Prefix            : in     String;
-      Program           : in     String;
+     (Prefix            : in     UTF8_String;
+      Program           : in     UTF8_String;
       Arguments         : in     Shell.String_Array := Shell.Nil_Strings;
       Working_Directory : in     String := ".")
    is
@@ -145,13 +181,44 @@ package body Analytical_Engine.Schematic_Handler is
       Prefixed_Output : Log_From_Pipe;
       Output          : Shell.Pipe;
       Process         : Shell.Process :=
-                          Start (Program           => Program,
+                          Start (Program           => String (Program),
                                  Arguments         => Arguments,
                                  Working_Directory => Working_Directory,
                                  Output            => Output) with Unreferenced;
    begin
       Prefixed_Output.Configure (Name => Prefix,
-                                Pipe => Output);
+                                 Pipe => Output);
    end Run_With_Prefixed_Output;
+
+   procedure Run_With_Prefixed_Output
+     (Prefix            : in     UTF8_String;
+      Command           : in     UTF8_String;
+      Working_Directory : in     String := ".")
+   is
+      use Shell;
+      Prefixed_Output : Log_From_Pipe;
+      Output          : Shell.Pipe;
+      Process         : Shell.Process :=
+                          Start (Command           => String (Command),
+                                 Working_Directory => Working_Directory,
+                                 Output            => Output) with Unreferenced;
+   begin
+      Prefixed_Output.Configure (Name => Prefix,
+                                 Pipe => Output);
+   end Run_With_Prefixed_Output;
+
+   function Value (Source  : in YAML.Node_Ref;
+                   Name    : in YAML.UTF8_String;
+                   Default : in YAML.UTF8_String) return YAML.UTF8_String is
+   begin
+      case Source.Item (Name).Kind is
+         when No_Node =>
+            return Default;
+         when Scalar_Node =>
+            return Source.Item (Name).Value;
+         when others =>
+            return raise Constraint_Error;
+      end case;
+   end Value;
 
 end Analytical_Engine.Schematic_Handler;

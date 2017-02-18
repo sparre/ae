@@ -1,4 +1,5 @@
 with "ashell";
+with "libyaml_ada";
 
 project Default is
 

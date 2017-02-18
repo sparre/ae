@@ -27,6 +27,13 @@ package body Analytical_Engine.Environment is
                       Name                 => "bin");
    end Exec_Directory;
 
+   function Repos_Directory return String is
+      use Ada.Directories;
+   begin
+      return Compose (Containing_Directory => Cache_Directory,
+                      Name                 => "repos");
+   end Repos_Directory;
+
    function Root_Directory return String is
       use Ada.Directories;
    begin
